@@ -14,6 +14,13 @@
 # ./odoo-install
 ################################################################################
 
+# Get domain name from user for let's encrypt configuration
+echo -e "Enter your domain (without www) and press [ENTER]: "
+read setup_domain
+
+echo -e "Enter your email and press [ENTER]: "
+read setup_email
+
 OE_USER="odoo"
 OE_HOME="/$OE_USER"
 OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
@@ -80,6 +87,7 @@ echo -e "\n--- Install other required packages"
 sudo apt-get install node-clean-css -y
 sudo apt-get install node-less -y
 sudo apt-get install python-gevent -y
+sudo apt-get install python3-setuptools -y
 
 #--------------------------------------------------
 # Install Wkhtmltopdf if needed
@@ -261,3 +269,86 @@ echo "Start Odoo service: sudo service $OE_CONFIG start"
 echo "Stop Odoo service: sudo service $OE_CONFIG stop"
 echo "Restart Odoo service: sudo service $OE_CONFIG restart"
 echo "-----------------------------------------------------------"
+
+
+#--------------------------------------------------
+# Setup let's encrypt
+#--------------------------------------------------
+# Remember to change domain DNS with IP address of server
+sudo git clone https://github.com/letsencrypt/letsencrypt /opt/letsencrypt
+sudo systemctl stop nginx
+./letsencrypt-auto certonly --standalone --email setup_email -d setup_domain -d www.setup_domain
+
+
+#--------------------------------------------------
+# Setup nginx
+#--------------------------------------------------
+sudo apt-get install nginx -y
+sudo service nginx start
+sudo rm /etc/nginx/sites-enabled/default
+#sudo touch /etc/nginx/sites-available/odoo
+echo -e "* Creating nginx config file for odoo at /etc/nginx/sites-available/odoo"
+cat <<EOF > /etc/nginx/sites-enabled/odoo
+upstream odoo {
+  server 127.0.0.1:8069;
+}
+upstream odoochat {
+  server 127.0.0.1:8072;
+}
+server {
+  listen 443 ssl;
+  server_name domain.tld www.domain.tld;
+
+  # SSL parameters
+  # ssl on;
+  ssl_certificate /etc/letsencrypt/live/domain.tld/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/domain.tld/privkey.pem;
+  ssl_session_timeout 30m;
+  ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+  ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES12$'
+  ssl_prefer_server_ciphers on;
+
+  # Add Headers for odoo proxy mode
+  proxy_set_header X-Forwarded-Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Real-IP $remote_addr;
+
+  # log
+  access_log /var/log/nginx/odoo.access.log;
+  error_log /var/log/nginx/odoo.error.log;
+  
+  # cache static data  
+  location ~* /web/static/ { 
+    proxy_cache_valid 200 60m; 
+    proxy_buffering on; 
+    expires 864000; 
+    proxy_pass http://odoo; 
+  } 
+
+  # Redirect longpoll requests to odoo longpolling port
+  location /longpolling {
+    proxy_pass http://odoochat;
+  }
+  # Redirect requests to odoo backend server
+  location / {
+    proxy_redirect off;
+    proxy_pass http://odoo;
+  }
+
+ # common gzip
+ gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+ gzip on;
+}
+
+server {
+  listen 80;
+  server_name domain.tld www.domain.tld;
+  return 301 https://$host$request_uri;
+}
+EOF
+sudo ln -s /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/odoo
+
+echo -e "* Please edit odoo config file, replace domain.tld with your domain"
+sudo nano /etc/nginx/sites-enabled/odoo
+
